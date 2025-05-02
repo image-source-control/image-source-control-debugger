@@ -71,6 +71,17 @@ function isc_debug_admin_bar_menu( $wp_admin_bar ) {
 		return;
 	}
 
+	// Get upload directory info once
+	$upload_dir       = wp_get_upload_dir();
+	$upload_path_base = '';
+	if ( $upload_dir && ! empty( $upload_dir['baseurl'] ) ) {
+		$parsed_upload_url = wp_parse_url( $upload_dir['baseurl'] );
+		if ( $parsed_upload_url && isset( $parsed_upload_url['path'] ) ) {
+			// Ensure the path starts and ends with a slash for reliable comparison/replacement
+			$upload_path_base = trailingslashit( $parsed_upload_url['path'] );
+		}
+	}
+
 	// 7. Process and Add Each Image Found.
 	foreach ( $isc_post_images as $attachment_id => $image_data ) {
 		// Ensure attachment ID is a valid positive integer.
@@ -78,18 +89,13 @@ function isc_debug_admin_bar_menu( $wp_admin_bar ) {
 			continue; // Ignore entries without a valid attachment ID.
 		}
 
-		// Get the image URL from the stored data.
-		// Prioritize the documented array structure [url, ...].
-		// Fallback to assuming $image_data is the URL string itself if it's not an array.
-		$image_url = '';
-		if ( is_array( $image_data ) && isset( $image_data[0] ) && is_string( $image_data[0] ) ) {
-			$image_url = $image_data[0];
-		} elseif ( is_string( $image_data ) ) {
-			// Fallback for potential older/different storage format where $image_data is just the URL.
-			$image_url = $image_data;
+		// Apply the fix: Get URL directly if it's a string, otherwise fallback
+		$image_url = is_string( $image_data ) ? $image_data : '';
+
+		if ( empty( $image_url ) && is_array( $image_data ) && isset( $image_data[0] ) && is_string( $image_data[0] ) ) {
+			$image_url = $image_data[0]; // Try the array format if string wasn't found
 		}
 
-		// Fallback if URL wasn't found in meta or meta format was unexpected.
 		if ( empty( $image_url ) ) {
 			$image_url = wp_get_attachment_url( $attachment_id );
 			if ( ! $image_url ) {
@@ -98,13 +104,11 @@ function isc_debug_admin_bar_menu( $wp_admin_bar ) {
 		}
 
 		$relative_url = '(URL parse error)';
-		$search_path  = ''; // Path to use for JS search
 
 		if ( $image_url !== '(URL not found)' ) {
 			$parsed_url = wp_parse_url( $image_url );
 			if ( $parsed_url && isset( $parsed_url['path'] ) ) {
 				$relative_url = $parsed_url['path']; // Use only the path part
-				$search_path  = $relative_url; // Use this path for searching attributes
 			} elseif ( $image_url === '(URL not found)' ) {
 				$relative_url = '(URL not found)';
 			} else {
@@ -112,6 +116,20 @@ function isc_debug_admin_bar_menu( $wp_admin_bar ) {
 				$relative_url = $image_url;
 			}
 		}
+
+		// Prepare display URL (shortened) and search path (full relative)
+		$display_relative_url = $relative_url; // Default to full relative path
+		$search_path          = $relative_url; // Keep search path as full relative path
+
+		// Check if the relative URL starts with the upload path base
+		if ( ! empty( $upload_path_base ) && strpos( $relative_url, $upload_path_base ) === 0 ) {
+			// Remove the base upload path for display only
+			$display_relative_url = '/' . ltrim( substr( $relative_url, strlen( $upload_path_base ) ), '/' );
+		} elseif ( $relative_url === '(URL parse error)' || $relative_url === '(URL not found)' ) {
+			$display_relative_url = $relative_url; // Keep error strings
+			$search_path          = ''; // Don't search for error strings
+		}
+		// else: If it's not in uploads or couldn't parse, keep original relative path for display
 
 		$attribution_text    = get_post_meta( $attachment_id, 'isc_image_source', true );
 		$display_attribution = ( ! empty( $attribution_text ) && is_string( $attribution_text ) )
@@ -121,19 +139,19 @@ function isc_debug_admin_bar_menu( $wp_admin_bar ) {
 		$edit_link        = get_edit_post_link( $attachment_id, 'raw' );
 		$edit_url_escaped = $edit_link ? esc_url( $edit_link ) : '#';
 
-		// Prepare clickable attachment ID
+		// Prepare clickable attachment ID with a specific class for styling
 		$attachment_id_link = sprintf(
-			'<a href="%s" target="_blank" title="%s" style="text-decoration:none; color:inherit; box-shadow:none;">%d</a>',
+			'<a href="%s" target="_blank" title="%s" class="isc-debug-attachment-link" style="color:inherit; box-shadow:none;">%d</a>',
 			$edit_url_escaped,
 			esc_attr( 'Edit Attachment ' . $attachment_id ),
 			$attachment_id
 		);
 
-		// Prepare clickable relative URL part
 		$relative_url_link = sprintf(
-			'<span class="isc-debug-url-link" data-isc-debug-url="%s" title="Click to find on page">%s</span>',
-			esc_attr( $search_path ), // Use the relative path for searching
-			esc_html( $relative_url )
+			'<span class="isc-debug-url-link" data-isc-debug-url="%s" title="%s">%s</span>',
+			esc_attr( $search_path ),
+			$display_relative_url,            // Tooltip text
+			esc_html( $display_relative_url ) // The shortened path
 		);
 
 		// Combine parts for the node title
@@ -187,6 +205,7 @@ function isc_debug_admin_bar_styles() {
 			text-overflow: ellipsis;
 			max-width: 600px; /* Adjust as needed */
 		}
+		/* General link styling within debug items */
 		#wp-admin-bar-isc-debug-default .ab-item a,
 		#wp-admin-bar-isc-debug-default .ab-item .isc-debug-url-link {
 			display: inline;
@@ -194,6 +213,16 @@ function isc_debug_admin_bar_styles() {
 			box-shadow: none;
 			border: none;
 		}
+		/* Style for the clickable Attachment ID */
+		#wp-admin-bar-isc-debug-default .ab-item a.isc-debug-attachment-link {
+			text-decoration: underline;
+			text-decoration-style: dotted;
+		}
+		#wp-admin-bar-isc-debug-default .ab-item a.isc-debug-attachment-link:hover {
+			color: #00a0d2; /* WordPress blue */
+			text-decoration-style: solid;
+		}
+		/* Style for the clickable URL span */
 		#wp-admin-bar-isc-debug-default .ab-item .isc-debug-url-link {
 			cursor: pointer;
 			text-decoration: underline;
@@ -201,10 +230,12 @@ function isc_debug_admin_bar_styles() {
 		}
 		#wp-admin-bar-isc-debug-default .ab-item .isc-debug-url-link:hover {
 			color: #00a0d2; /* WordPress blue */
+			text-decoration-style: solid;
 		}
 		#wp-admin-bar-isc-debug > .ab-item {
 			/* Optional styling for the main menu item */
 		}
+		/* Style for highlighting images on the page via JS */
 		.isc-debug-highlight {
 			outline: 3px solid #ff0000 !important; /* Red outline */
 			box-shadow: 0 0 10px #ff0000 !important; /* Red glow */
